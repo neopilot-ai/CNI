@@ -9,7 +9,7 @@ FROM alpine:$ALPINE_VERSION
 # Install ca-certificates and security updates
 RUN apk update && \
     apk upgrade && \
-    apk add --no-cache ca-certificates && \
+    apk add --no-cache ca-certificates=20240226-r0 && \
     rm -rf /var/cache/apk/*
 
 # Create non-root user for security
