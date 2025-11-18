@@ -1,0 +1,115 @@
+# Multi-stage build for PostgreSQL on UBI8
+ARG BUILD_IMAGE=registry.access.redhat.com/ubi8/ubi-minimal:8.8
+
+FROM ${BUILD_IMAGE} as builder
+
+ARG PG_VERSION=16.1
+ARG BUILD_DIR=/tmp/build
+
+# Environment variables
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# Install build dependencies
+RUN microdnf update -y && \
+    microdnf install -y \
+        gcc \
+        gcc-c++ \
+        make \
+        autoconf \
+        bison \
+        flex \
+        libxml2-devel \
+        libxslt-devel \
+        openssl-devel \
+        readline-devel \
+        libuuid-devel \
+        icu-devel \
+        systemd-devel \
+        zlib-devel \
+        curl \
+        ca-certificates && \
+    microdnf clean all && \
+    rm -rf /var/cache/yum/*
+
+# Build PostgreSQL from source
+RUN mkdir -p ${BUILD_DIR} && \
+    cd ${BUILD_DIR} && \
+    curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.gz" -o postgresql.tar.gz && \
+    curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.gz.sha256" -o postgresql.tar.gz.sha256 && \
+    sha256sum -c postgresql.tar.gz.sha256 && \
+    tar -xzf postgresql.tar.gz && \
+    rm postgresql.tar.gz postgresql.tar.gz.sha256 && \
+    cd postgresql-${PG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local/pgsql \
+        --with-openssl \
+        --with-libedit-preferred \
+        --with-uuid=ossp \
+        --with-icu \
+        --with-systemd \
+        --enable-thread-safety \
+        --enable-debug \
+        --disable-rpath && \
+    make -j "$(nproc)" world && \
+    make -j "$(nproc)" install-world && \
+    cd / && \
+    rm -rf ${BUILD_DIR}
+
+# Prepare assets for final image
+RUN mkdir -p /assets && \
+    cp -R --parents /usr/local/pgsql /assets/
+
+# Runtime stage
+FROM ${BUILD_IMAGE}
+
+ARG PG_USER=postgres
+ARG PG_UID=999
+ARG PG_DATA_DIR=/var/lib/postgresql/data
+
+# Environment variables
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+ENV PGDATA=${PG_DATA_DIR}
+ENV PATH=/usr/local/pgsql/bin:$PATH
+
+# Install runtime dependencies
+RUN microdnf update -y && \
+    microdnf install -y \
+        libxml2 \
+        libxslt \
+        openssl-libs \
+        readline \
+        libuuid \
+        libicu \
+        curl \
+        ca-certificates && \
+    microdnf clean all && \
+    rm -rf /var/cache/yum/*
+
+# Create postgres user and directories
+RUN groupadd -r -g ${PG_UID} ${PG_USER} && \
+    useradd -r -m -g ${PG_USER} -u ${PG_UID} ${PG_USER} && \
+    mkdir -p ${PG_DATA_DIR} /var/run/postgresql && \
+    chown -R ${PG_USER}:${PG_USER} ${PG_DATA_DIR} /var/run/postgresql
+
+# Copy PostgreSQL from builder
+COPY --from=builder /assets/ /
+
+# Copy initialization scripts
+COPY --chown=${PG_USER}:${PG_USER} scripts/ /docker-entrypoint-initdb.d/
+RUN chmod +x /docker-entrypoint-initdb.d/*.sh
+
+# Switch to postgres user
+USER ${PG_USER}
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD pg_isready -U ${PG_USER} -d ${PGDATA}
+
+# Set volumes
+VOLUME ["${PG_DATA_DIR}"]
+
+# Default command
+CMD ["/usr/local/pgsql/bin/postgres"] 
