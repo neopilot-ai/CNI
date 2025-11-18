@@ -1,0 +1,75 @@
+# Multi-stage build for kubectl and yq on UBI8
+ARG UBI_IMAGE=registry.access.redhat.com/ubi8/ubi-minimal:8.8
+
+FROM ${UBI_IMAGE} as builder
+
+# Current stable versions
+ARG KUBECTL_VERSION=1.29.2
+ARG YQ_VERSION=4.40.5
+
+# Environment variables
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# Install build dependencies
+RUN microdnf update -y && \
+    microdnf install -y \
+        ca-certificates \
+        curl && \
+    microdnf clean all && \
+    rm -rf /var/cache/yum/*
+
+# Download and verify kubectl
+RUN curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /assets/usr/local/bin/kubectl && \
+    curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" -o /tmp/kubectl.sha256 && \
+    echo "$(cat /tmp/kubectl.sha256)  /assets/usr/local/bin/kubectl" | sha256sum -c - && \
+    chmod +x /assets/usr/local/bin/kubectl && \
+    rm /tmp/kubectl.sha256
+
+# Download and verify yq
+RUN curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64" -o /assets/usr/local/bin/yq && \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64.sha256" -o /tmp/yq.sha256 && \
+    echo "$(cat /tmp/yq.sha256)  /assets/usr/local/bin/yq" | sha256sum -c - && \
+    chmod +x /assets/usr/local/bin/yq && \
+    rm /tmp/yq.sha256
+
+# Runtime stage
+FROM ${UBI_IMAGE}
+
+ARG USER_UID=65534
+
+# Environment variables
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# Install runtime dependencies
+RUN microdnf update -y && \
+    microdnf install -y \
+        ca-certificates \
+        openssl \
+        openssh-clients && \
+    microdnf clean all && \
+    rm -rf /var/cache/yum/*
+
+# Create non-root user
+RUN groupadd -r -g ${USER_UID} kubectluser && \
+    useradd -r -m -g kubectluser -u ${USER_UID} kubectluser && \
+    mkdir -p /home/kubectluser/.kube && \
+    chown -R kubectluser:kubectluser /home/kubectluser/.kube
+
+# Copy binaries from builder
+COPY --from=builder /assets/ /
+
+# Switch to non-root user
+USER kubectluser
+
+# Set working directory
+WORKDIR /home/kubectluser
+
+# Add kubectl and yq to PATH
+ENV PATH="/usr/local/bin:$PATH"
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD kubectl version --client --short && yq --version || exit 1
+
+# Default command
+CMD ["/bin/bash"]
