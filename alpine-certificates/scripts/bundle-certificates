@@ -1,0 +1,87 @@
+#!/bin/sh
+
+# Exit on any error, treat unset variables as errors, and exit on pipe failures
+set -eu
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+}
+
+# Function to safely remove directory contents
+safe_cleanup() {
+    local dir="$1"
+    if [ -d "$dir" ] && [ "$(ls -A "$dir" 2>/dev/null)" ]; then
+        log "Cleaning up directory: $dir"
+        rm -rf "$dir"/*
+    else
+        log "Directory $dir is empty or does not exist, skipping cleanup"
+    fi
+}
+
+# Function to process certificate files
+process_certificates() {
+    local cert_dir="/etc/ssl/certs"
+    local processed=0
+    local errors=0
+
+    log "Processing certificate files in $cert_dir"
+    
+    # Find all .pem and .crt files
+    for f in "$cert_dir"/*.pem "$cert_dir"/*.crt; do
+        # Skip if no files match the pattern
+        [ -f "$f" ] || continue
+        
+        if [ -L "$f" ]; then
+            # Handle symlinks
+            origin="$(readlink -f "$f")"
+            if [ -n "$origin" ] && [ -f "$origin" ]; then
+                origin_path="${origin%/*}"
+                if [ "$origin_path" != "/etc/ssl/certs" ]; then
+                    log "Dereferencing symlink: $f -> $origin"
+                    rm "$f"
+                    cp "$origin" "$f"
+                    processed=$((processed + 1))
+                else
+                    log "Keeping internal symlink: $f"
+                fi
+            else
+                log "WARNING: Broken symlink detected: $f"
+                errors=$((errors + 1))
+            fi
+        else
+            log "Regular file: $f"
+            processed=$((processed + 1))
+        fi
+    done
+    
+    log "Certificate processing completed: $processed processed, $errors errors"
+    return "$errors"
+}
+
+# Main execution
+main() {
+    log "Starting certificate bundling process"
+    
+    # Clean up existing state
+    safe_cleanup "/etc/ssl/certs"
+    
+    # Update the CA certificates store
+    log "Updating CA certificates store"
+    update-ca-certificates
+    
+    # Process and dereference symlinks
+    process_certificates
+    
+    # Verify the result
+    if [ -f "/etc/ssl/certs/ca-certificates.crt" ]; then
+        log "Certificate bundling completed successfully"
+        exit 0
+    else
+        log "ERROR: ca-certificates.crt not found after processing"
+        exit 1
+    fi
+}
+
+# Run main function
+main "$@"
